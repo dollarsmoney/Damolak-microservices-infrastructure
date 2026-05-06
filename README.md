@@ -518,5 +518,5 @@ This project is licensed under the MIT License.
 ---
 
 <p align="center">
-  <sub>Built with ❤️ by <strong>Damolak Technologies</strong></sub>
+  <sub>Built with ❤️ by <strong>Itoje Dollars Efe</strong></sub>
 </p>
