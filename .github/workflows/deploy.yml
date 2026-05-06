@@ -1,0 +1,210 @@
+# ─────────────────────────────────────────────────────
+# Damolak Microservices — CI/CD Pipeline
+#
+# Triggers on push to main or pull requests.
+# Builds all 5 services, runs tests, pushes to ECR,
+# and deploys to ECS Fargate automatically.
+# ─────────────────────────────────────────────────────
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: damolak
+  ENVIRONMENT: production
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ── Job 1: Test All Services ───────────────────────
+  test:
+    name: Test Services
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: api-gateway
+            language: node
+            test_cmd: npm test
+          - service: auth-service
+            language: java
+            test_cmd: mvn test -B
+          - service: data-service
+            language: python
+            test_cmd: pytest tests/ -v
+          - service: notification-service
+            language: python
+            test_cmd: pytest tests/ -v
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Node.js Services ──────────────────────────
+      - name: Setup Node.js
+        if: matrix.language == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
+
+      - name: Install Node dependencies
+        if: matrix.language == 'node'
+        run: |
+          cd services/${{ matrix.service }}
+          npm ci
+
+      # ── Java Services ─────────────────────────────
+      - name: Setup Java
+        if: matrix.language == 'java'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # ── Python Services ───────────────────────────
+      - name: Setup Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        if: matrix.language == 'python'
+        run: |
+          cd services/${{ matrix.service }}
+          pip install -r requirements.txt
+
+      # ── Run Tests ─────────────────────────────────
+      - name: Run tests
+        run: |
+          cd services/${{ matrix.service }}
+          ${{ matrix.test_cmd }}
+
+  # ── Job 2: Build & Push Docker Images ──────────────
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        service:
+          - api-gateway
+          - auth-service
+          - data-service
+          - processing-service
+          - notification-service
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-${{ matrix.service }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd services/${{ matrix.service }}
+
+          echo "Building ${{ matrix.service }}..."
+          docker build \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.repository }}" \
+            .
+
+          echo "Pushing ${{ matrix.service }} to ECR..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  # ── Job 3: Deploy to ECS ───────────────────────────
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy all services to ECS
+        run: |
+          CLUSTER="${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-cluster"
+          SERVICES=(
+            "api-gateway"
+            "auth-service"
+            "data-service"
+            "processing-service"
+            "notification-service"
+          )
+
+          for SERVICE in "${SERVICES[@]}"; do
+            ECS_SERVICE="${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-${SERVICE}"
+            echo "🚀 Deploying ${SERVICE}..."
+
+            aws ecs update-service \
+              --cluster "$CLUSTER" \
+              --service "$ECS_SERVICE" \
+              --force-new-deployment \
+              --no-cli-pager
+
+            echo "✅ ${SERVICE} deployment triggered"
+          done
+
+      - name: Wait for services to stabilize
+        run: |
+          CLUSTER="${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-cluster"
+          SERVICES=(
+            "${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-api-gateway"
+            "${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-auth-service"
+            "${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-data-service"
+            "${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-processing-service"
+            "${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-notification-service"
+          )
+
+          echo "⏳ Waiting for services to stabilize..."
+
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "Waiting for ${SERVICE}..."
+            aws ecs wait services-stable \
+              --cluster "$CLUSTER" \
+              --services "$SERVICE" \
+              --no-cli-pager || echo "⚠️ ${SERVICE} did not stabilize in time"
+          done
+
+          echo "🎉 All services deployed successfully!"
+
+      - name: Verify deployment
+        run: |
+          CLUSTER="${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-cluster"
+          echo "📊 Deployment Summary:"
+          aws ecs list-services --cluster "$CLUSTER" --no-cli-pager

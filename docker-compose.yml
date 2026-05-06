@@ -1,0 +1,134 @@
+# ─────────────────────────────────────────────────────
+# Docker Compose — Local Development
+#
+# Mirrors ECS architecture locally. All 5 services run
+# in a shared network with Docker DNS for service discovery.
+#
+# Usage:
+#   docker-compose up --build
+#   docker-compose down -v
+# ─────────────────────────────────────────────────────
+
+version: '3.8'
+
+services:
+  # ── API Gateway (Node.js) ──────────────────────────
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: damolak-api-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - LOG_LEVEL=debug
+      - AUTH_SERVICE_URL=http://auth-service:8080
+      - DATA_SERVICE_URL=http://data-service:8000
+      - PROCESSING_SERVICE_URL=http://processing-service:8081
+      - NOTIFICATION_SERVICE_URL=http://notification-service:5000
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      data-service:
+        condition: service_healthy
+      processing-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - damolak-network
+
+  # ── Auth Service (Java/Spring Boot) ────────────────
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: damolak-auth-service
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=default
+      - JWT_SECRET=local-dev-secret-key-change-in-production-min-256-bits-required
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - damolak-network
+
+  # ── Data Service (Python/FastAPI) ──────────────────
+  data-service:
+    build:
+      context: ./services/data-service
+      dockerfile: Dockerfile
+    container_name: damolak-data-service
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - PORT=8000
+      - LOG_LEVEL=debug
+      - PROCESSING_SERVICE_URL=http://processing-service:8081
+      - NOTIFICATION_SERVICE_URL=http://notification-service:5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - damolak-network
+
+  # ── Processing Service (Go) ────────────────────────
+  processing-service:
+    build:
+      context: ./services/processing-service
+      dockerfile: Dockerfile
+    container_name: damolak-processing-service
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - damolak-network
+
+  # ── Notification Service (Python/Flask) ────────────
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: damolak-notification-service
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - LOG_LEVEL=DEBUG
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - damolak-network
+
+networks:
+  damolak-network:
+    driver: bridge
+    name: damolak-network

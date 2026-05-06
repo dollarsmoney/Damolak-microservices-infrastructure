@@ -1,0 +1,36 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: damolak-auth-service
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+# JWT Configuration
+jwt:
+  secret: ${JWT_SECRET:damolak-dev-secret-key-change-in-production-min-256-bits-required}
+  expiration-ms: ${JWT_EXPIRATION_MS:3600000}
+  issuer: ${JWT_ISSUER:damolak-auth-service}
+
+# Actuator (health endpoint for ALB)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+# Logging — JSON format for CloudWatch
+logging:
+  pattern:
+    console: '{"timestamp":"%d{ISO8601}","level":"%p","service":"auth-service","logger":"%c","message":"%m","thread":"%t"}%n'
+  level:
+    root: INFO
+    com.damolak: DEBUG
